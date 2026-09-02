@@ -30,7 +30,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly INSTALLER_VERSION="1.0.0"
+readonly INSTALLER_VERSION="1.0.1"
 readonly ECOS_RELEASE_OWNER="Ecoscard"
 readonly ECOS_RELEASE_REPO="ecos-manager-releases"
 readonly GITHUB_API="https://api.github.com"
@@ -750,14 +750,39 @@ install_selected_project() {
     printf 'Project: %s\n' "${SELECTED_PROJECT}"
     printf 'Version: %s\n\n' "${SELECTED_PROJECT_VERSION}"
 
-    "${GLOBAL_BIN}" project install "${SELECTED_PROJECT}" \
+    # The installer itself uses umask 077 to protect the customer token. Do not
+    # propagate that restrictive umask to non-secret ECOS runtime state.
+    ( umask 022; "${GLOBAL_BIN}" project install "${SELECTED_PROJECT}" ) \
         || die "Project Bundle installation failed: ${SELECTED_PROJECT}"
 
     info "Activating Project Bundle: ${SELECTED_PROJECT}"
-    "${GLOBAL_BIN}" use "${SELECTED_PROJECT}" \
+    ( umask 022; "${GLOBAL_BIN}" use "${SELECTED_PROJECT}" ) \
         || die "Unable to activate Project Bundle: ${SELECTED_PROJECT}"
 
-    ok "Project Bundle ${SELECTED_PROJECT} installed and activated."
+    # Initialize environment.env from the Project Bundle template without
+    # collecting product credentials yet. Product-specific configuration remains
+    # a separate, explicit step for the customer/administrator.
+    info "Initializing Project Bundle configuration..."
+    if ( umask 022; "${GLOBAL_BIN}" config >/dev/null ); then
+        ok "Project configuration initialized."
+    else
+        warn "Project was installed, but its initial configuration could not be created automatically."
+        warn "Run: sudo ecos config"
+    fi
+
+    # Defense in depth for Managers older than 2.3.4 and for upgrades from an
+    # installation created under a restrictive umask.
+    chmod 755 "${STATE_DIR}" 2>/dev/null || true
+    [[ -d "${STATE_DIR}/project-bundles" ]] && chmod 755 "${STATE_DIR}/project-bundles" 2>/dev/null || true
+    [[ -f "${STATE_DIR}/active-project" ]] && chmod 644 "${STATE_DIR}/active-project" 2>/dev/null || true
+    if [[ -d "${STATE_DIR}/project-bundles/${SELECTED_PROJECT}" ]]; then
+        find "${STATE_DIR}/project-bundles/${SELECTED_PROJECT}" -type d -exec chmod 755 {} + 2>/dev/null || true
+        find "${STATE_DIR}/project-bundles/${SELECTED_PROJECT}" -type f -exec chmod a+r {} + 2>/dev/null || true
+        [[ -d "${STATE_DIR}/project-bundles/${SELECTED_PROJECT}/hooks" ]] && \
+            find "${STATE_DIR}/project-bundles/${SELECTED_PROJECT}/hooks" -type f -name '*.sh' -exec chmod 755 {} + 2>/dev/null || true
+    fi
+
+    ok "Project Bundle ${SELECTED_PROJECT} installed, activated and initialized."
 }
 
 run_doctor() {
@@ -809,15 +834,16 @@ Useful commands:
   ecos project list
   ecos doctor
   ecos status
+  sudo ecos config
   sudo ecos self-update
 
 EOF_SUCCESS
 
     if [[ -n "${SELECTED_PROJECT}" ]]; then
         cat <<EOF_PRODUCT
-The Project Bundle is installed and active.
+The Project Bundle is installed, active and its base configuration is initialized.
 
-If ECOS Doctor reported missing configuration, configure the required
+If ECOS Doctor reported missing required settings, configure the required
 items before starting the application stack. Typical commands include:
 
   sudo ecos config
